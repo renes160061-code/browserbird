@@ -1,13 +1,18 @@
-/** @fileoverview Spawn the Claude CLI as a subprocess with streaming output. */
+/** @fileoverview Spawn/run the AI provider with streaming output.
+ *
+ * For the Gemini provider we don't shell out to a CLI — we call the SDK
+ * directly via runGemini().  The original subprocess logic is preserved below
+ * but is only reached if you ever switch back to a CLI-based provider.
+ */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import type { SpawnOptions } from './claude.ts';
-import { buildCommand, parseStreamLine } from './claude.ts';
+import type { SpawnOptions } from './gemini.ts';
+import { buildCommand, parseStreamLine, runGemini } from './gemini.ts';
 import type { StreamEvent } from './stream.ts';
 import { splitLines } from './stream.ts';
 import { logger } from '../core/logger.ts';
 
-export type { SpawnOptions } from './claude.ts';
+export type { SpawnOptions } from './gemini.ts';
 
 const SIGKILL_GRACE_MS = 10_000;
 
@@ -48,11 +53,38 @@ interface SpawnResult {
 }
 
 /**
- * Spawns the Claude CLI with streaming output.
+ * Runs the Gemini provider with streaming output.
  * Returns an async iterable of parsed stream events and a kill handle.
+ *
+ * When the provider binary is "gemini-sdk" (the sentinel returned by
+ * buildCommand) we call runGemini() directly instead of spawning a process.
  */
 export function spawnProvider(options: SpawnOptions, signal: AbortSignal): SpawnResult {
   const cmd = buildCommand(options);
+
+  // -----------------------------------------------------------------------
+  // Gemini SDK path — no subprocess needed.
+  // -----------------------------------------------------------------------
+  if (cmd.binary === 'gemini-sdk') {
+    // Merge any API key from buildCommand.env into extraEnv so runGemini sees it.
+    const mergedOptions: SpawnOptions = {
+      ...options,
+      extraEnv: { ...cmd.env, ...options.extraEnv },
+    };
+
+    const abortController = new AbortController();
+    // Forward the caller's signal to our internal controller.
+    signal.addEventListener('abort', () => abortController.abort(), { once: true });
+
+    return {
+      events: runGemini(mergedOptions, abortController.signal),
+      kill: () => abortController.abort(),
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Legacy subprocess path (kept for future CLI-based providers).
+  // -----------------------------------------------------------------------
   const timeoutMs = options.agent.processTimeoutMs ?? options.globalTimeoutMs ?? 300_000;
 
   logger.debug(`spawning: ${cmd.binary} ${cmd.args.join(' ')} (timeout: ${timeoutMs}ms)`);
